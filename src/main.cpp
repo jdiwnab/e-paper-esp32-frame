@@ -1,16 +1,11 @@
+#include <fs.h>
 #include <SPI.h>
-#include <FS.h>
-#include <SD.h>
+#include <SdFat.h>
 #include "epd7in3combined.h"
 #include <Preferences.h>
 #include <algorithm>
 #include <vector>
 #include "time_utils.h"
-#include "esp_adc_cal.h"
-#include "driver/adc.h"
-
-//This is the pin for the transistor that powers the external components
-#define TRANSISTOR_PIN 26
 
 Preferences preferences;
 
@@ -18,12 +13,17 @@ Epd epd;
 unsigned long delta; // Variable to store the time it took to update the display for deep sleep calculations
 unsigned long deltaSinceTimeObtain; // Variable to store the time it took to update the display since the time was obtained for deep sleep calculations
 
-#define SD_CS_PIN 22
+#define SPI_SPEED SD_SCK_MHZ(25)
+int sdSCK = SDIO_CLK;
+int sdPICO = SDIO_CMD; // SDI
+int sdPOCI = SDIO0; //SDO
+int sdCS = SDIO3;
+
+SdFat sd;
 
 uint16_t width() { return EPD_WIDTH; }
 uint16_t height() { return EPD_HEIGHT; }
 
-SPIClass vspi(VSPI); // VSPI for SD card
 
 
 #if defined(DISPLAY_TYPE_E)
@@ -49,14 +49,14 @@ SPIClass vspi(VSPI); // VSPI for SD card
   };
 #endif
 
-uint16_t read16(fs::File &f) {
+uint16_t read16(File32 &f) {
   uint16_t result;
   ((uint8_t *)&result)[0] = f.read(); // LSB
   ((uint8_t *)&result)[1] = f.read(); // MSB
   return result;
 }
 
-uint32_t read32(fs::File &f) {
+uint32_t read32(File32 &f) {
   uint32_t result;
   ((uint8_t *)&result)[0] = f.read(); // LSB
   ((uint8_t *)&result)[1] = f.read();
@@ -65,7 +65,7 @@ uint32_t read32(fs::File &f) {
   return result;
 }
 
-float readBattery() {
+/*float readBattery() {
   uint32_t value = 0;
   int rounds = 11;
   esp_adc_cal_characteristics_t adc_chars;
@@ -93,62 +93,7 @@ float readBattery() {
   //due to the voltage divider (1M+1M) values must be multiplied by 2
   //and convert mV to V
   return esp_adc_cal_raw_to_voltage(value, &adc_chars)*2.0/1000.0;
-}
-
-void setup() {
-  Serial.begin(115200);
-  delta = millis();
-  
-  preferences.begin("e-paper", false);
-
-  esp_sleep_wakeup_cause_t wakeup_reason;
-  wakeup_reason = esp_sleep_get_wakeup_cause();
-
-  if(wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
-    Serial.println("Woke up from deep sleep due to timer.");
-  } else {
-    Serial.println("Did not wake up from deep sleep.");
-  }
-
-  // Turn on the transistor to power the external components
-  pinMode(TRANSISTOR_PIN, OUTPUT);
-  digitalWrite(TRANSISTOR_PIN, HIGH); 
-  delay(100);
-
-  // Initialize the SD card
-  while(!SD.begin(SD_CS_PIN, vspi)){
-    Serial.println("Card Mount Failed");
-    hibernate();
-  }
-
-  // Initialize Wifi and get the time
-  initializeWifi();
-  initializeTime();
-
-  deltaSinceTimeObtain = millis();
-
-  // Initialize the e-paper display
-  if (epd.Init() != 0) {
-    Serial.println("eP init F");
-    hibernate();
-  }else{
-    Serial.println("eP init no F");
-  }
-
-  checkSDFiles(); //Check if the SD files have changed and update the preferences if needed
-
-  String file = getNextFile(); // Get the next file to display
-
-  drawBmp(file.c_str()); // Display the file
-
-  digitalWrite(TRANSISTOR_PIN, LOW); // Turn off external components
-
-  preferences.end();
-}
-
-void loop() {
-    hibernate();
-}
+}*/
 
 void hibernate() {
     Serial.println("start sleep");
@@ -156,11 +101,20 @@ void hibernate() {
     esp_deep_sleep(static_cast<uint64_t>(getSecondsTillNextImage(delta, deltaSinceTimeObtain))* 1e6);
 }
 
+
+
+void loop() {
+  //if(Serial.available()) ESP.restart();
+  //hibernate();
+}
+
+
+
 // Function to check if the SD files have changed and update the preferences if needed
 void checkSDFiles(){
   
   Serial.println("Checking info.txt File");
-  File infoFile = SD.open("/info.txt");  // Try to open info.txt
+  File32 infoFile = sd.open("/info.txt");  // Try to open info.txt
 
   if (!infoFile) {
     Serial.println("info.txt not found");
@@ -176,16 +130,16 @@ void checkSDFiles(){
   Serial.println("Content of info.txt: " + infoText);
 
   // Check if the info.txt content has changed, if so update the preferences
-  if(preferences.getString("checker", "") != infoText){
+  if(!preferences.isKey("checker") || preferences.getString("checker", "") != infoText || infoText ==""){
     Serial.println("Check SD File");
-    File root = SD.open("/");
+    File32 root = sd.open("/");
     u_int16_t fileCount = 0;  
     String fileString = "";
     std::vector<String> bmpFiles;
 
     // Get every filename in the root directory and save the ones with '.bmp' extension in the bmpFiles vector
     while (true) {
-      File entry =  root.openNextFile(); 
+      File32 entry =  root.openNextFile(); 
 
       if (!entry) {
         Serial.println("No more files");
@@ -193,13 +147,14 @@ void checkSDFiles(){
         root.close();
         break;
       }
-  
-      uint8_t nameSize = String(entry.name()).length();  // get file name size
-      String str1 = String(entry.name()).substring( nameSize - 4 );  // save the last 4 characters (file extension)
-  
+      char filename[25] = "";
+      entry.getName(filename, 25);  
+      uint8_t nameSize = String(filename).length();  // get file name size
+      String str1 = String(filename).substring( nameSize - 4 );  // save the last 4 characters (file extension)
+
       if ( str1.equalsIgnoreCase(".bmp") ) {  // if the file has '.bmp' extension
-        bmpFiles.push_back(entry.name());
-        Serial.println(String(entry.name()));  // print the file name
+        bmpFiles.push_back(filename);
+        Serial.println(String(filename));  // print the file name
       }
   
       entry.close();  // close the file
@@ -217,7 +172,7 @@ void checkSDFiles(){
     preferences.putString("checker", infoText);
 
     // Save the fileString to a txt file to parse the files later
-    File file = SD.open("/fileString.txt", FILE_WRITE);
+    File32 file = sd.open("/fileString.txt", O_WRITE);
     if(!file){
       Serial.println("Failed to open file for writing");
       return;
@@ -230,7 +185,7 @@ void checkSDFiles(){
 // Function to get the next file to display
 String getNextFile(){
   // Read fileString from txt file
-  File file = SD.open("/fileString.txt");
+  File32 file = sd.open("/fileString.txt");
   if(!file){
     Serial.println("Failed to open file for reading");
     return "";
@@ -334,11 +289,34 @@ String getNextFile(){
   return "/" + nextFile;
 }
 
+// Function to depalette the image
+int depalette( uint8_t r, uint8_t g, uint8_t b ){
+	int p;
+	int mindiff = 100000000;
+	int bestc = 0;
+
+  // Find the color in the colorPallete that is closest to the r g b values
+	for( p = 0; p < sizeof(colorPallete)/3; p++ )
+	{
+		int diffr = ((int)r) - ((int)colorPallete[p*3+0]);
+		int diffg = ((int)g) - ((int)colorPallete[p*3+1]);
+		int diffb = ((int)b) - ((int)colorPallete[p*3+2]);
+		int diff = (diffr*diffr) + (diffg*diffg) + (diffb * diffb);
+		if( diff < mindiff )
+		{
+			mindiff = diff;
+			bestc = p;
+		}
+	}
+	return bestc;
+}
+
 // Function to draw a BMP image on the e-paper display
 bool drawBmp(const char *filename) {
   Serial.println("Drawing bitmap file: " + String(filename));
-  fs::File bmpFS;
-  bmpFS =  SD.open(filename); // Open requested file on SD card
+  uint32_t pixelCount = 0;
+  File32 bmpFS;
+  bmpFS = sd.open(filename); // Open requested file on SD card
   uint32_t seekOffset, headerSize, paletteSize = 0;
   int16_t row;
   uint8_t r, g, b;
@@ -367,6 +345,12 @@ bool drawBmp(const char *filename) {
     return false;
   }
 
+  if(h>height() || w>width()){
+    Serial.println("image dimentions too large, must be <800 and <480");
+    bmpFS.close();
+    return false;
+  }
+
   uint32_t palette[256];
   if (bitDepth <= 8) // 1,4,8 bit bitmap: read color palette
   {
@@ -383,23 +367,27 @@ bool drawBmp(const char *filename) {
   uint16_t x = (width() - w) /2;
   uint16_t y = (height() - h) /2;
 
+  Serial.println("Height: "+String(h));
+  Serial.println("Width: "+String(w));
+  Serial.println("X Offset: "+String(x));
+  Serial.println("Y Offset: "+String(y));
+
   bmpFS.seek(seekOffset);
 
   uint32_t lineSize = ((bitDepth * w +31) >> 5) * 4;
   uint8_t lineBuffer[lineSize];
   uint8_t nextLineBuffer[lineSize];
-
-  epd.SendCommand(0x10); // start data frame
-
-  epd.EPD_7IN3F_Draw_Blank(y, width(), EPD_WHITE); // fill area on top of pic white
   
+  epd.SendCommand(0x10); // start data frame
+  epd.EPD_7IN3F_Draw_Blank(y, width(), EPD_WHITE); // fill area on top of pic white
+
   // row is decremented as the BMP image is drawn bottom up
   bmpFS.read(lineBuffer, sizeof(lineBuffer));
   //reverse linBuffer with the alorithm library 
   std::reverse(lineBuffer, lineBuffer + sizeof(lineBuffer));
 
-  float batteryVolts = readBattery();
-  Serial.println("Battery voltage: " + String(batteryVolts) + "V");
+  // float batteryVolts = readBattery();
+  // Serial.println("Battery voltage: " + String(batteryVolts) + "V");
 
   for (row = h-1; row >= 0; row--) {
     epd.EPD_7IN3F_Draw_Blank(1, x, EPD_WHITE); // fill area on the left of pic white
@@ -521,14 +509,14 @@ bool drawBmp(const char *filename) {
         #endif
       }
 
-      if (batteryVolts <= 3.3 && col <= 50 && row >= h-50){
+      /*if (batteryVolts > 1.0 && batteryVolts <= 3.3 && col <= 50 && row >= h-50){
         color = EPD_RED;
-        if (batteryVolts < 3.1) {
+        if (batteryVolts > 1.0 && batteryVolts < 3.1) { // less than 1 would be already down, assume some issue or non-battery power
           Serial.println("Battery critically low, hibernating...");
 
           //switch off everything that might consume power
-          esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF);
-          esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
+          //esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF);
+          //esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
           esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
           esp_sleep_pd_config(ESP_PD_DOMAIN_XTAL, ESP_PD_OPTION_OFF);
           esp_sleep_pd_config(ESP_PD_DOMAIN_VDDSDIO, ESP_PD_OPTION_OFF);
@@ -538,18 +526,19 @@ bool drawBmp(const char *filename) {
           esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
           digitalWrite(2, LOW);
-          esp_deep_sleep_start();
+          //esp_deep_sleep_start();
 
           Serial.println("This should never get printed");
           return false;
         }
-      }
+      }*/
 
       // Vodoo magic i don't understand
-      uint32_t buf_location = (row*(width()/2)+col/2);
+      //uint32_t buf_location = (row*(width()/2)+col/2);
       if (col & 0x01) {
         output |= color;
         epd.SendData(output);
+        pixelCount += 2;
       } else {
         output = color << 4;
       }
@@ -564,27 +553,75 @@ bool drawBmp(const char *filename) {
   bmpFS.close(); // Close the file
   epd.TurnOnDisplay(); // Turn on the display
   epd.Sleep(); // Put the display to sleep
+  Serial.print("Pixel Count: "); Serial.println(pixelCount);
   return true;
 }
 
-// Function to depalette the image
-int depalette( uint8_t r, uint8_t g, uint8_t b ){
-	int p;
-	int mindiff = 100000000;
-	int bestc = 0;
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) {} //wait for serial
+  Serial.println("Startup");
 
-  // Find the color in the colorPallete that is closest to the r g b values
-	for( p = 0; p < sizeof(colorPallete)/3; p++ )
-	{
-		int diffr = ((int)r) - ((int)colorPallete[p*3+0]);
-		int diffg = ((int)g) - ((int)colorPallete[p*3+1]);
-		int diffb = ((int)b) - ((int)colorPallete[p*3+2]);
-		int diff = (diffr*diffr) + (diffg*diffg) + (diffb * diffb);
-		if( diff < mindiff )
-		{
-			mindiff = diff;
-			bestc = p;
-		}
-	}
-	return bestc;
+  delta = millis();
+
+  if(!SPI.begin(sdSCK,sdPOCI,sdPICO,sdCS)) {
+    Serial.println("Unable to start SPI to SD");
+    return;
+  }
+  if(!sd.begin(SdSpiConfig(sdCS, DEDICATED_SPI, SPI_SPEED))) {
+    if(sd.card()->errorCode()) {
+      Serial.print("SD init failed. Error Code: ");
+      Serial.print(int(sd.card()->errorCode()));
+      Serial.print("    Error Data: ");
+      Serial.println(int(sd.card()->errorData()));
+      return;
+    }
+  }
+  Serial.println("SD Card Inited");
+  
+  preferences.begin("e-paper", false);
+
+  pinMode(5,OUTPUT);
+  pinMode(7,OUTPUT);
+
+  //esp_sleep_wakeup_cause_t wakeup_reason;
+  //wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  // if(wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+  //   Serial.println("Woke up from deep sleep due to timer.");
+  // } else {
+  //   Serial.println("Did not wake up from deep sleep.");
+  // }
+
+  // Turn on the transistor to power the external components
+//  pinMode(TRANSISTOR_PIN, OUTPUT);
+//  digitalWrite(TRANSISTOR_PIN, HIGH); 
+//  delay(100);
+
+
+  // Initialize Wifi and get the time
+  initializeWifi();
+  initializeTime();
+
+  //deltaSinceTimeObtain = millis();
+
+  // Initialize the e-paper display
+  Serial.println("Initing display");
+  if (epd.Init() != 0) {
+    Serial.println("eP init Failed");
+    //hibernate();
+  }
+  Serial.println("display inited");
+
+  checkSDFiles(); //Check if the SD files have changed and update the preferences if needed
+
+  String file = getNextFile(); // Get the next file to display
+
+  epd.EPD_7IN3E_Show7Block();
+
+  drawBmp(file.c_str()); // Display the file
+
+  // digitalWrite(TRANSISTOR_PIN, LOW); // Turn off external components
+
+  preferences.end();
 }

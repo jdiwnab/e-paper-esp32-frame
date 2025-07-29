@@ -55,6 +55,7 @@ int Epd::Init(void) {
     Reset();
     DelayMs(20);
     EPD_7IN3F_BusyHigh();
+
     
     SendCommand(0xAA);    // CMDH
     SendData(0x49);
@@ -274,12 +275,46 @@ parameter:
 ******************************************************************************/
 void Epd::EPD_7IN3F_Draw_Blank(UWORD rows, UWORD cols, UBYTE color)
 {
+    Serial.print("Drawing Blank, Color: 0x");
+    Serial.println(((color<<4)|color), HEX);
     unsigned long i, j;
     for(int i=0; i<cols/2; i++) {
         for(int j=0; j<rows; j++) {
             SendData((color<<4)|color);
 		}
 	}
+}
+
+/******************************************************************************
+function :  show 7 kind of color block
+parameter:
+******************************************************************************/
+void Epd::EPD_7IN3E_Show7Block(void)
+{
+    unsigned long i, j;
+    uint8_t k = 0;
+    
+
+    SendCommand(0x10);
+    for(i=0; i<240; i++) {
+        for(k = 0 ; k < 4; k ++) {
+            Serial.println("Outputing Color k: "+String(k));
+            for(j = 0 ; j < 100; j ++) {
+                SendData((k<<4) | k);
+            }
+        }
+    }
+    
+    for(i=0; i<240; i++) {
+        for(k = 4 ; k < 8; k ++) {
+            Serial.println("Outputing Color k: "+String(k));
+            for(j = 0 ; j < 100; j ++) {
+                SendData((k<<4) |k);
+            }
+        }
+    }
+
+    TurnOnDisplay();
 }
 
 /******************************************************************************

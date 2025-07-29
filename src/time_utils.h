@@ -2,10 +2,11 @@
 #define TIME_UTILS_H
 
 #include <WiFi.h>
-#include <SD.h>
+#include <SdFat.h>
 #include <SPI.h>
 // #include "time.h"
 #include <ArduinoJson.h>
+
 
 #define USE_MOCK_TIME 0
 

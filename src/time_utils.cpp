@@ -1,16 +1,18 @@
 #include "time_utils.h"
 #include <WiFi.h>
 // #include "time.h"
-#include <SD.h>
+#include <SdFat.h>
 #include <SPI.h>
 #include <ArduinoJson.h>
 
 const char* ntpServer = "europe.pool.ntp.org";
-const long  gmtOffset_sec = 3600; // GMT+1
+const long  gmtOffset_sec = -5*3600; // GMT-5
 const int   daylightOffset_sec = 3600; // Daylight saving time offset
 bool wifiWorking = false;
 bool timeWorking = false;
 struct tm timeinfo;
+
+extern SdFat sd;
 
 #define USE_MOCK_TIME 0
 
@@ -30,7 +32,7 @@ struct tm timeinfo;
 void initializeWifi() {
 
     // Open setup.json file
-    File file = SD.open("/setup.json");
+    File32 file = sd.open("/setup.json");
     if (!file) {
         Serial.println("Failed to open setup.json file");
         return;
